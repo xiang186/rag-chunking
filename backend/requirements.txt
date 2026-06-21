@@ -1,0 +1,44 @@
+# FastAPI 核心
+fastapi>=0.115.0
+uvicorn[standard]>=0.32.0
+python-multipart>=0.0.12
+
+# Pydantic V2
+pydantic>=2.10.0
+pydantic-settings>=2.6.0
+
+# 数据库
+sqlalchemy[asyncio]>=2.0.36
+asyncpg>=0.30.0
+
+# Redis（任务队列预留）
+redis>=5.2.0
+
+# LangChain v1.2+
+langchain>=0.3.14
+langchain-core>=0.3.28
+langchain-text-splitters>=0.3.4
+langchain-openai>=0.2.14
+langchain-community>=0.3.0  # cosine_similarity（语义分块/对话体分块/检索使用）
+# langchain-experimental>=0.3.4  # 当前未使用，保留供扩展
+
+# OpenAI API（Embedding 服务 + 语义分块）
+openai>=1.0.0
+
+# 文档解析
+unstructured[pdf]>=0.16.0
+docling>=2.104.0  # 高精度 PDF 解析（需启用 Docling 开关），首次使用会下载 HuggingFace 模型
+pypdf>=6.0.0  # 轻量 PDF 页数读取
+pdfplumber>=0.11.0  # PDF 文本提取回退方案（docling/unstructured 失败时使用）
+
+# 工具
+python-dotenv>=1.0.1
+
+# 文本清洗
+ftfy>=6.3.1
+
+# PII 增强（可选：开启「增强模式」时需安装）
+# presidio-analyzer>=2.2.0
+# presidio-anonymizer>=2.2.0
+# spacy>=3.7.0
+# 使用 Presidio 中文 NER 还需执行：python -m spacy download zh_core_web_sm
