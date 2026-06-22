@@ -6,7 +6,7 @@ import ChunkingConfig from '@/components/ChunkingConfig.vue'
   <div class="app-container">
     <header class="app-header">
       <h1>RAG 文档分块系统</h1>
-      <p class="subtitle">支持 5 种高级分块策略 · 实时预览 · 企业级架构</p>
+      <p class="subtitle">支持多种高级分块策略 · 实时预览 · 企业级架构</p>
     </header>
     <main>
       <ChunkingConfig />

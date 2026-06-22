@@ -1195,7 +1195,10 @@ class DimensionParser:
     支持扁平模式和多层表头模式。
     """
 
-    def parse(self, hdf: pd.DataFrame, ddf: pd.DataFrame, text: str = "") -> DimensionInfo:
+    def parse(
+        self, hdf: pd.DataFrame, ddf: pd.DataFrame, text: str = "",
+        data_employee_names: Optional[List[str]] = None,
+    ) -> DimensionInfo:
         """
         解析维度结构。
 
@@ -1203,6 +1206,8 @@ class DimensionParser:
             hdf: 表头 DataFrame（全 <th> 行）。
             ddf: 数据 DataFrame（含 <td> 的行）。
             text: 原始 HTML（可选）。
+            data_employee_names: 从隐式列名行中提取的员工姓名列表（可选）。
+                当表头行只有"评分信息"等通用标签、实际姓名在数据首行时使用。
 
         Returns:
             DimensionInfo。
@@ -1220,8 +1225,8 @@ class DimensionParser:
         else:
             info.headers = [str(i) for i in range(ncols)]
 
-        # 检测员工列（使用表头行）
-        employee_pairs = self._detect_employee_columns(hdf, text)
+        # 检测员工列（使用表头行 + 数据首行员工姓名）
+        employee_pairs = self._detect_employee_columns(hdf, text, data_employee_names)
         info.employee_pairs = employee_pairs
 
         if employee_pairs:
@@ -1235,7 +1240,8 @@ class DimensionParser:
         return info
 
     def _detect_employee_columns(
-        self, hdf: pd.DataFrame, text: str
+        self, hdf: pd.DataFrame, text: str,
+        data_employee_names: Optional[List[str]] = None,
     ) -> List[Tuple[str, int, int]]:
         """检测员工及评分/理由列。
 
@@ -1243,6 +1249,8 @@ class DimensionParser:
         A. 多层表头：row0 含姓名（colspan=2），row1 为"评分""评分理由"
         B. 姓名模式：检测「姓名：XXX」的 colspan th 及其后的 评分/理由 列
         C. 扁平模式：列名匹配 "姓名-评分" 模式
+        D. 数据首行模式：通过 data_employee_names 在列名中找到对应的员工列。
+            针对硬件组/驱动组这种表头行只有"评分信息"、员工名在数据首行(<td>)的场景。
         """
         import re
         results: List[Tuple[str, int, int]] = []
@@ -1314,6 +1322,37 @@ class DimensionParser:
                 for pat in _COL_DIM_PATTERNS:
                     if re.match(pat, cell):
                         results.append((cell, i, -1))
+
+        if results:
+            return results
+
+        # ── 策略D: 数据首行模式 — 通过 data_employee_names 定位员工列 ──
+        if data_employee_names and len(hdf) >= 1:
+            row0 = [str(hdf.iloc[0, c]).strip() for c in range(ncols)]
+            # 在表头行中找到「评分信息」或「评分」对应的列, 然后按 data_employee_names 的顺序分组
+            # 表头结构: [固定列...][评分信息(colspan=2)][评分信息(colspan=2)]...
+            # data_employee_names: ["吴国","晏阳新","黄毅飞","周承锋"]
+            score_cols: List[int] = []
+            for i, cell in enumerate(row0):
+                if "评分" in cell or "得分" in cell:
+                    score_cols.append(i)
+
+            # 如果找到的评分列数量与员工数匹配，按顺序分配
+            if len(score_cols) == len(data_employee_names):
+                for idx, emp_name in enumerate(data_employee_names):
+                    sc = score_cols[idx]
+                    # 评分列下一列通常是理由列（即使表头写的是"评分信息"）
+                    rc = sc + 1 if sc + 1 < ncols else -1
+                    results.append((emp_name, sc, rc))
+            elif score_cols:
+                # 评分列数不等于员工数，尝试按2列一组的方式提取
+                # 每个员工占2列（评分+理由），从第一个评分列开始
+                stride = 2
+                for idx, emp_name in enumerate(data_employee_names):
+                    sc = score_cols[0] + idx * stride
+                    if sc < ncols:
+                        rc = sc + 1 if sc + 1 < ncols else -1
+                        results.append((emp_name, sc, rc))
 
         return results
 
@@ -1414,12 +1453,37 @@ class ComplexTableChunker:
 
         # 检测并移除数据中的"隐式列名行"（<td> 包装的列标签行）
         # 这类行的前 3 列通常包含"考核项""考核指标""指标说明"等短文本标签
+        # 注意：这类行中可能包含员工姓名（如硬件组表：吴国 / 评分理由 / 晏阳新...），
+        # 需要在删除前提取出来供 DimensionParser 使用。
+        data_employee_names: List[str] = []
         if ddf.shape[0] > 0:
             first_vals = [str(ddf.iloc[0, c]).strip() for c in range(min(3, ddf.shape[1]))]
             if _looks_like_header_row(first_vals):
+                # 从首行中提取员工姓名（从第一个"评分"列之后的位置查找非列标签的文本）
+                first_row = [str(ddf.iloc[0, c]).strip() for c in range(ddf.shape[1])]
+                # 找到第一个"评分"/"评分理由"/"序号"等标记的列，其后的奇数列通常是员工名
+                name_start = -1
+                for c in range(len(first_row)):
+                    cell = first_row[c]
+                    if cell in ("评分", "得分", "分数") and c + 1 < len(first_row):
+                        # 从"评分"列开始，每2列一组（评分+评分理由），第0列是员工名
+                        name_start = c - 1 if c > 0 else c
+                        break
+                    if cell == "序号":
+                        name_start = c + 1
+                        break
+                if name_start >= 0:
+                    for c in range(name_start, len(first_row), 2):
+                        name = first_row[c]
+                        if name and name not in ("评分", "评分理由", "得分", "分数", "nan", ""):
+                            # 清理"姓名："前缀
+                            clean_name = re.sub(r"^姓名[：:]?\s*", "", name).strip()
+                            if clean_name:
+                                data_employee_names.append(clean_name)
+
                 ddf = ddf.iloc[1:].reset_index(drop=True)
 
-        dim_info = self.parser.parse(hdf, ddf, table_html)
+        dim_info = self.parser.parse(hdf, ddf, table_html, data_employee_names)
         long_df = self.transformer.transform(ddf, dim_info)
         if long_df.empty:
             return []
