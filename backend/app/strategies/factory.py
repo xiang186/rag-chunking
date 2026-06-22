@@ -17,7 +17,7 @@ from app.strategies.parent_child import ParentChildChunker
 from app.strategies.pdf_table_layout import PDFTableLayoutChunker
 from app.strategies.recursive_character import RecursiveCharacterChunker
 from app.strategies.semantic import SemanticChunker
-from app.strategies.table_chunker import HTMLTableChunker, ComplexHTMLTableChunker
+from app.strategies.table_chunker import HTMLTableChunker, ComplexHTMLTableChunker, ConfigTableChunker
 
 # 策略注册表：strategy_name -> Chunker 类
 STRATEGY_REGISTRY: Dict[str, Type[BaseChunker]] = {
@@ -29,6 +29,7 @@ STRATEGY_REGISTRY: Dict[str, Type[BaseChunker]] = {
     StrategyName.DIALOGUE_AWARE: DialogueAwareSemanticChunker,
     StrategyName.HTML_TABLE: HTMLTableChunker,
     StrategyName.COMPLEX_TABLE: ComplexHTMLTableChunker,
+    StrategyName.TABLE_CONFIG: ConfigTableChunker,
 }
 
 # 每种策略的默认参数和适用场景说明（供前端展示）
@@ -297,6 +298,56 @@ STRATEGY_META: Dict[str, Dict[str, Any]] = {
                 "max": 500,
                 "step": 10,
                 "description": "指标和考核标准字段的最大字符数，超出部分以「…」截断。设为 0 表示不截断。",
+            },
+        ],
+    },
+    StrategyName.TABLE_CONFIG: {
+        "label": "可配置表格分块",
+        "description": "上传文档后分析表格结构，让用户手动选择员工列、评分列、理由列和元数据列，适用于任意结构的复杂表格",
+        "default_params": {
+            "employee_col": -1,
+            "score_col": -1,
+            "reason_col": -1,
+            "metadata_cols": [],
+            "skip_rows": 1,
+        },
+        "param_schema": [
+            {
+                "key": "employee_col",
+                "label": "员工姓名列",
+                "type": "select",
+                "options": [],
+                "description": "请先上传文档并点击「分析表格」获取列信息",
+            },
+            {
+                "key": "score_col",
+                "label": "评分列",
+                "type": "select",
+                "options": [],
+                "description": "请先上传文档并点击「分析表格」获取列信息",
+            },
+            {
+                "key": "reason_col",
+                "label": "评分理由列",
+                "type": "select",
+                "options": [],
+                "description": "请先上传文档并点击「分析表格」获取列信息（选填）",
+            },
+            {
+                "key": "metadata_cols",
+                "label": "元数据列（多选）",
+                "type": "select",
+                "options": [],
+                "description": "选择哪些列作为元数据附加到Chunk中",
+            },
+            {
+                "key": "skip_rows",
+                "label": "跳过行数",
+                "type": "slider",
+                "min": 0,
+                "max": 10,
+                "step": 1,
+                "description": "表格顶部需要跳过的表头行数",
             },
         ],
     },

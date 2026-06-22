@@ -9,6 +9,7 @@ export type StrategyName =
   | 'dialogue_aware'
   | 'html_table'
   | 'complex_table'
+  | 'table_config'
 
 export interface ParamSchemaItem {
   key: string

@@ -24,6 +24,7 @@ from app.services.document_service import (
 )
 from app.services.log_service import emit_log, LogLevel
 from app.strategies.factory import ChunkerFactory
+from app.strategies.table_analysis import analyze_tables, TableAnalysisResult
 
 router = APIRouter(prefix="/api/documents", tags=["documents"])
 
@@ -71,6 +72,44 @@ async def upload_document(
         filename=file.filename,
         file_size=file_size,
     )
+
+
+@router.post("/{doc_id}/analyze-tables")
+async def analyze_document_tables(
+    doc_id: str,
+    session: AsyncSession = Depends(get_db),
+):
+    """
+    分析文档中的 HTML 表格结构，返回每张表的行列数、每列示例数据和自动识别建议。
+    用于前端列映射配置界面。
+    """
+    doc = await get_document(session, doc_id)
+    if not doc:
+        raise HTTPException(status_code=404, detail=f"文档 {doc_id} 不存在")
+    if not doc.content_text:
+        raise HTTPException(status_code=400, detail="文档内容为空")
+
+    result = analyze_tables(doc.content_text)
+
+    # 转换为可序列化格式
+    tables_data = []
+    for t in result.tables:
+        cols = []
+        for c in t.columns:
+            cols.append({
+                "col_index": c.col_index,
+                "sample_values": c.sample_values,
+                "suggested_role": c.suggested_role,
+            })
+        tables_data.append({
+            "table_index": t.table_index,
+            "rows": t.rows,
+            "cols": t.cols,
+            "group_name": t.group_name,
+            "columns": cols,
+        })
+
+    return {"total_tables": result.total_tables, "tables": tables_data}
 
 
 @router.post("/{doc_id}/preview", response_model=ChunkPreviewResponse)

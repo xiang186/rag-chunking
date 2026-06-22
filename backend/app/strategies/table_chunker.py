@@ -1804,8 +1804,128 @@ class ComplexHTMLTableChunker(BaseChunker):
         return results
 
 
+# ════════════════════════════════════════════════════════════
+# 10.  ConfigTableChunker — 可配置列映射的分块器
+# ════════════════════════════════════════════════════════════
+
+
+@dataclass
+class ColumnMapping:
+    """用户配置的列映射关系。"""
+    employee_col: int = -1
+    score_col: int = -1
+    reason_col: int = -1
+    metadata_cols: Optional[List[int]] = None
+    skip_rows: int = 0
+
+    def is_valid(self) -> bool:
+        return self.employee_col >= 0 and self.score_col >= 0
+
+
+def _strip_cell(val: str) -> str:
+    val = re.sub(r"^姓名[：:]?\s*", "", val)
+    return val.strip()
+
+
+def _try_float(val: str) -> Any:
+    try:
+        return float(val.replace("分", ""))
+    except (ValueError, TypeError):
+        return val
+
+
+class ConfigTableChunker(BaseChunker):
+    """
+    可配置的表格分块器。
+    不依赖硬编码检测，完全按照用户指定的列映射执行分块。
+    """
+
+    def __init__(self, params: Optional[Dict[str, Any]] = None):
+        super().__init__(params)
+        self.restorer = HTMLMatrixRestorer()
+
+    def chunk(self, text: str, **kwargs: Any) -> List[ChunkResult]:
+        from bs4 import BeautifulSoup
+        soup = BeautifulSoup(text, "html.parser")
+        tables = soup.find_all("table")
+        results: List[ChunkResult] = []
+
+        mapping = self._build_mapping()
+        if not mapping.is_valid():
+            return results
+
+        current_group = ""
+        table_index = 0
+        for elem in soup.children:
+            if hasattr(elem, "get_text"):
+                t = elem.get_text(strip=True)
+                if t.startswith("# "):
+                    current_group = t[2:].strip()
+            if getattr(elem, "name", None) == "table" and table_index < len(tables):
+                chunks = self._process_table(str(elem), mapping, current_group)
+                for c in chunks:
+                    results.append(ChunkResult(
+                        text=c["content"],
+                        metadata=c["metadata"],
+                        char_start=0, char_end=0,
+                    ))
+                table_index += 1
+        return results
+
+    def _build_mapping(self) -> ColumnMapping:
+        p = self.params
+        return ColumnMapping(
+            employee_col=int(p.get("employee_col", -1)),
+            score_col=int(p.get("score_col", -1)),
+            reason_col=int(p.get("reason_col", -1)),
+            metadata_cols=p.get("metadata_cols", None),
+            skip_rows=int(p.get("skip_rows", 0)),
+        )
+
+    def _process_table(
+        self, table_html: str, mapping: ColumnMapping, group_name: str = ""
+    ) -> List[Dict[str, Any]]:
+        hdf, ddf = self.restorer.restore(table_html)
+        if ddf.empty:
+            return []
+        if mapping.skip_rows > 0 and mapping.skip_rows < ddf.shape[0]:
+            ddf = ddf.iloc[mapping.skip_rows:].reset_index(drop=True)
+
+        meta_cols = mapping.metadata_cols or []
+        chunks: List[Dict[str, Any]] = []
+
+        for _, row_data in ddf.iterrows():
+            emp = str(row_data.iloc[mapping.employee_col]) if mapping.employee_col < len(row_data) else ""
+            score = str(row_data.iloc[mapping.score_col]) if mapping.score_col < len(row_data) else ""
+            reason = str(row_data.iloc[mapping.reason_col]) if mapping.reason_col >= 0 and mapping.reason_col < len(row_data) else ""
+
+            emp = _strip_cell(emp)
+            score = _strip_cell(score)
+            reason = _strip_cell(reason)
+
+            if not emp or not score or score in ("nan", "", "/", "-"):
+                continue
+
+            content = f"员工【{emp}】得分为【{score}】分"
+            if reason and reason not in ("nan", "", "/", "-"):
+                content += f"，评分理由：【{reason}】"
+            content += "。"
+
+            metadata: Dict[str, Any] = {"employee_name": emp, "score": _try_float(score)}
+            if group_name:
+                metadata["group_name"] = group_name
+            for mc in meta_cols:
+                if mc < len(row_data):
+                    val = _strip_cell(str(row_data.iloc[mc]))
+                    if val and val != "nan":
+                        metadata[f"col_{mc}"] = val
+
+            chunks.append({"content": content, "metadata": metadata})
+        return chunks
+
+
 # ────────────────────────────────────────────────────────────
-# 10. 命令行快速测试（if __name__ == "__main__"）
+# 11. 命令行快速测试（if __name__ == "__main__"）
 # ────────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
@@ -1827,7 +1947,6 @@ if __name__ == "__main__":
         <tr>
             <td>1</td>
             <td>0-5.2</td>
-            <td>褐黄色含砾粉质粘土，可塑，含少量植物根系。</td>
         </tr>
         <tr>
             <td>2</td>

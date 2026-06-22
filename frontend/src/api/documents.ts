@@ -131,6 +131,13 @@ export async function searchChunks(
   return data
 }
 
+export async function analyzeTables(
+  docId: string,
+): Promise<Record<string, unknown>> {
+  const { data } = await api.post(`/documents/${docId}/analyze-tables`)
+  return data
+}
+
 export async function testEmbedding(
   apiKey: string,
   baseUrl: string,

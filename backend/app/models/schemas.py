@@ -19,6 +19,7 @@ class StrategyName(str, Enum):
     DIALOGUE_AWARE = "dialogue_aware"
     HTML_TABLE = "html_table"
     COMPLEX_TABLE = "complex_table"
+    TABLE_CONFIG = "table_config"
 
 
 # ── 检索相关模型 ──
