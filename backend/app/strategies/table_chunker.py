@@ -1442,11 +1442,39 @@ class ComplexTableChunker:
         soup = BeautifulSoup(text, "html.parser")
         tables = soup.find_all("table")
         all_chunks: List[Dict[str, Any]] = []
-        for table in tables:
-            all_chunks.extend(self._process_table(str(table)))
+
+        # 提取每个 <table> 前面的组名（支持 Markdown 标题和 HTML 标题标签）
+        # 遍历 soup 的所有顶层元素，找到 table 前最近的标题文本
+        table_idx = 0
+        current_group = ""
+        for elem in soup.children:
+            if table_idx >= len(tables):
+                break
+            name = getattr(elem, "name", None)
+            # HTML 标题标签
+            if name in ("h1", "h2", "h3", "h4"):
+                current_group = elem.get_text(strip=True)
+            # Markdown 标题以 # 开头（BeautifulSoup 解析为文本或 Tag）
+            elif hasattr(elem, "get_text"):
+                text_content = elem.get_text(strip=True) if hasattr(elem, "get_text") else str(elem).strip()
+                if text_content.startswith("# "):
+                    current_group = text_content.lstrip("# ").strip()
+                elif text_content.startswith("## "):
+                    current_group = text_content.lstrip("# ").strip()
+            # 遇到 table 时，将当前的组名传给 _process_table
+            if name == "table":
+                chunks = self._process_table(str(elem), group_name=current_group)
+                all_chunks.extend(chunks)
+                table_idx += 1
+
+        # 兜底：如果上面的遍历方式没命中所有 table，回退到原始方式
+        if table_idx < len(tables):
+            for table in tables[table_idx:]:
+                all_chunks.extend(self._process_table(str(table), group_name=""))
+
         return all_chunks
 
-    def _process_table(self, table_html: str) -> List[Dict[str, Any]]:
+    def _process_table(self, table_html: str, group_name: str = "") -> List[Dict[str, Any]]:
         hdf, ddf = self.restorer.restore(table_html)
         if ddf.empty or hdf.empty or ddf.shape[0] < 1:
             return []
@@ -1487,6 +1515,9 @@ class ComplexTableChunker:
         long_df = self.transformer.transform(ddf, dim_info)
         if long_df.empty:
             return []
+        # 将组名加入 long_df，供后续元数据生成使用
+        if group_name:
+            long_df["group_name"] = group_name
         return self._generate_chunks(long_df, dim_info)
 
     def _generate_chunks(self, long_df: pd.DataFrame, dim_info: DimensionInfo) -> List[Dict[str, Any]]:
@@ -1544,6 +1575,14 @@ class ComplexTableChunker:
                     for _, row in group_df.iterrows()
                 ],
             }
+
+            # 添加所属组名
+            first_row = group_df.iloc[0]
+            if "group_name" in first_row.index:
+                gn = str(first_row["group_name"])
+                if gn and gn != "nan":
+                    metadata["group_name"] = gn
+
             chunks.append({"content": content, "metadata": metadata})
 
         return chunks
@@ -1708,6 +1747,13 @@ class ComplexTableChunker:
                 meta["score"] = score_str
 
         meta["raw_row"] = {str(k): str(v) for k, v in row.items()}
+
+        # 添加所属组名
+        if "group_name" in row.index:
+            gn = str(row["group_name"])
+            if gn and gn != "nan":
+                meta["group_name"] = gn
+
         return meta
 
 
