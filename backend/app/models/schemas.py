@@ -17,6 +17,8 @@ class StrategyName(str, Enum):
     PDF_TABLE_LAYOUT = "pdf_table_layout"
     PARENT_CHILD = "parent_child"
     DIALOGUE_AWARE = "dialogue_aware"
+    HTML_TABLE = "html_table"
+    COMPLEX_TABLE = "complex_table"
 
 
 # ── 检索相关模型 ──
@@ -102,7 +104,7 @@ class ChunkPreviewRequest(BaseModel):
 
     strategy_name: StrategyName = Field(..., description="分块策略名称")
     params: Dict[str, Any] = Field(default_factory=dict, description="策略参数")
-    preview_limit: int = Field(default=500, ge=1, le=5000, description="预览上限（最终展示数由后端根据文档大小动态计算）")
+    preview_limit: int = Field(default=10, ge=1, le=99999, description="预览块数上限")
     cleaning_config: "CleaningConfigRequest | None" = Field(default=None, description="可选：分块前先执行数据清洗")
 
 

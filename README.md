@@ -1,6 +1,6 @@
 # RAG 文档分块（Chunking）系统
 
-前后端分离的企业级 RAG 文档分块系统，支持 **6 种分块策略**、**5 步数据清洗管道**、**向量检索**与实时可视化预览。
+前后端分离的企业级 RAG 文档分块系统，支持 **8 种分块策略**、**5 步数据清洗管道**、**向量检索**与实时可视化预览。
 
 ## 项目目录结构
 
@@ -44,7 +44,8 @@ RAG知识库搭建/
 │           ├── markdown_structure.py     # Markdown 结构分块
 │           ├── pdf_table_layout.py       # PDF 表格版面分块
 │           ├── parent_child.py           # 父子双粒度分块
-│           └── dialogue_aware.py         # 对话体感知语义分块
+│           ├── dialogue_aware.py         # 对话体感知语义分块
+│           └── table_chunker.py          # HTML 表格 + 复杂多维表格分块引擎
 └── frontend/
     ├── package.json
     ├── vite.config.ts
@@ -76,7 +77,7 @@ RAG知识库搭建/
 | 数据库 | PostgreSQL (asyncpg async driver) |
 | 缓存/队列 | Redis |
 
-## 六种分块策略
+## 八种分块策略
 
 | 策略 | 类名 | 适用场景 |
 |------|------|----------|
@@ -86,6 +87,8 @@ RAG知识库搭建/
 | PDF 表格版面分块 | `PDFTableLayoutChunker` | 含表格的 PDF，基于版面分析避免表格被切断；可选 Docling 引擎获得更精准的表格还原 |
 | 父子双粒度分块 | `ParentChildChunker` | 高精度检索，大粒度父块 + 小粒度子块 |
 | 对话体感知语义分块 | `DialogueAwareSemanticChunker` | 对话/会议记录，按发言人标签 + 话题边界切分 |
+| HTML 表格分块 | `HTMLTableChunker` | 通用 HTML `<table>` 表格，支持 rowspan/colspan、跨行引用（同上/参见）解析、主键模式聚合 |
+| 复杂多维表格分块 | `ComplexHTMLTableChunker` | 多层合并单元格的企业考核表/财务报表，自动识别员工维度与评分列，支持 indicator_split / weight_split 两种模板模式 |
 
 ### PDF 表格版面分块 — Docling 引擎
 
@@ -491,3 +494,33 @@ python -m spacy download zh_core_web_sm   # Presidio 中文模型
 ### \b 正则与中文文本
 
 Python `re` 模块的 `\b` 词边界将 CJK 字符视为 `\w`（Unicode 字母），导致 `\b1[3-9]\d{9}\b` 在中文后不生效。所有数字匹配使用 `(?<!\d)/(?!\d)` 替代 `\b/\B`。
+
+## 更新日志
+
+### 2026-06-22 — 复杂多维表格 + 前端优化
+
+#### 新增：复杂多维表格分块引擎
+- **`table_chunker.py`**：4 个新模块 — `HTMLMatrixRestorer`（矩阵还原器）、`DimensionParser`（多维表头解析器）、`LongTableTransformer`（宽表→长表转换器）、`ComplexTableChunker`（主类）
+- 自动识别多层合并单元格（rowspan/colspan）、自动检测员工列及对应的评分/评分理由列
+- 支持两种模板模式：
+  - **`indicator_split`**（默认）：每个（员工 × 指标）生成独立 Chunk
+  - **`weight_split`**：按权重分组，同权重下所有指标合并为一条 Chunk（更符合评分场景）
+- 字段截断：`max_field_length` 参数控制指标/考核标准字段最大字符数，超出以 `…` 截断
+- 注册为 `complex_table` 策略，前端自动渲染分块模式下拉框和截断长度滑块
+
+#### 新增：HTML 表格分块策略
+- `HTMLTableChunker` 包装类，基于 `TableParser` + `RowTemplateEngine` + `ReferenceResolver`
+- 支持 `default` 模式（每行一键生成键值对描述）和 `primary_key_based` 模式（按主键聚合）
+- 跨行引用解析：「同上」→ 上一行、「特征同X层」→ 第X行、「见/参见第X行」→ 指定行
+- 注册为 `html_table` 策略
+
+#### Bug 修复
+- **ffill(axis=0) 污染空白分数单元格**：移除 `HTMLMatrixRestorer` 中冗余的向下填充逻辑，空白分数不再被前一行值传染；同时增强 `_transform_by_pairs` 跳过 `/`、`—`、`#N/A` 等无数据标记
+- **`<p>` 标签多余空格**：`_clean_cell_text` 提取文本前为段落追加空格分隔符，避免多段落文字无间隔拼接
+- **`source_preview` 截断**：`chunk_service.py` 中，当表格策略 Chunk 的 `char_end` 全部为 0 时，使用完整文本作为预览原文
+
+#### 前端优化
+- 策略 radio 卡片左对齐（覆盖 Element Plus 默认 `white-space: nowrap`）
+- 新增「执行全量分块并入库」「清除」按钮（上传文档后显示）
+- 数据清洗管道按钮移至上传区域下方：启用后按钮变绿，显示（清洗已启用）及 X 关闭图标
+- 修复 TypeScript 类型错误（`CleaningConfig` 类型对齐），`npm run build` 零错误通过

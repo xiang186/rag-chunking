@@ -11,13 +11,13 @@
 
 import { computed, onMounted, ref, watch } from 'vue'
 import { ElMessage } from 'element-plus'
-import { UploadFilled, Document, Setting, View, Loading, Brush, Search as SearchIcon } from '@element-plus/icons-vue'
+import { UploadFilled, Document, Setting, View, Loading, Brush, Close, Search as SearchIcon } from '@element-plus/icons-vue'
 import { fetchStrategies, uploadDocument, executeChunking, testEmbedding } from '@/api/documents'
 import { useChunkPreview } from '@/composables/useChunkPreview'
 import LogPanel from '@/components/LogPanel.vue'
 import CleaningDrawer from '@/components/CleaningDrawer.vue'
 import RetrievalPanel from '@/components/RetrievalPanel.vue'
-import type { StrategyMeta, StrategyName } from '@/types/chunking'
+import type { StrategyMeta, StrategyName, CleaningConfig } from '@/types/chunking'
 import { CHUNK_COLORS } from '@/types/chunking'
 
 // ── 状态 ──
@@ -27,7 +27,7 @@ const uploadedFilename = ref<string>('')
 const selectedStrategy = ref<StrategyName>('recursive_character')
 const strategyParams = ref<Record<string, unknown>>({})
 const executing = ref(false)
-const previewLimit = ref(500)
+const previewLimit = ref(10)
 const sourceTextRef = ref<HTMLElement | null>(null)
 const activeChunkIndex = ref<number | null>(null)
 
@@ -54,7 +54,7 @@ const currentStrategyMeta = computed(() =>
 )
 
 // ── 清洗配置（与 CleaningDrawer 共享） ──
-const cleaningConfig = ref<Record<string, unknown> | null>(null)
+const cleaningConfig = ref<CleaningConfig | null>(null)
 const cleaningEnabled = ref(false)
 // 清洗配置变化时重新预览
 watch(cleaningConfig, () => {
@@ -121,11 +121,20 @@ async function handleUpload(file: File) {
     docId.value = res.doc_id
     uploadedFilename.value = res.filename
     ElMessage.success(`上传成功: ${res.filename}`)
+    // 上传后自动预览
     await fetchPreview()
   } catch {
     ElMessage.error('文件上传失败')
   }
   return false // 阻止 el-upload 默认上传行为
+}
+
+// ── 清除：回到未上传文档时的初始状态 ──
+function handleClear() {
+  docId.value = null
+  uploadedFilename.value = ''
+  previewData.value = null
+  activeChunkIndex.value = null
 }
 
 // ── 执行全量分块 ──
@@ -136,7 +145,7 @@ async function handleExecute() {
   }
   executing.value = true
   try {
-    const cc = cleaningEnabled.value && cleaningConfig.value ? cleaningConfig.value : undefined
+    const cc = cleaningEnabled.value && cleaningConfig.value ? { ...cleaningConfig.value } : undefined
     const res = await executeChunking(docId.value, selectedStrategy.value, strategyParams.value, cc)
     ElMessage.success(`${res.message} (Job ID: ${res.job_id})`)
   } catch (e: unknown) {
@@ -261,8 +270,8 @@ function openCleaningDrawer() {
   cleaningDrawerRef.value?.open(cleaningConfig.value ?? undefined)
 }
 
-function onCleaningApplied(cfg: Record<string, unknown>) {
-  cleaningConfig.value = { ...cfg, enable_heuristic: cfg.enable_heuristic ?? true } as Record<string, unknown>
+function onCleaningApplied(cfg: CleaningConfig) {
+  cleaningConfig.value = cfg
   cleaningEnabled.value = true
   ElMessage.success('清洗配置已应用到分块流程，预览将重新执行')
 }
@@ -307,6 +316,48 @@ function openRetrievalPanel() {
           <el-tag size="small" type="success">已上传</el-tag>
         </div>
       </el-card>
+
+      <!-- 数据清洗管道 -->
+      <el-button
+        :type="cleaningEnabled ? 'success' : 'info'"
+        @click="openCleaningDrawer"
+        style="width: 100%; margin-bottom: 8px"
+        :plain="!cleaningEnabled"
+      >
+        <span class="cleaning-btn-content">
+          <el-icon :size="16"><Brush /></el-icon>
+          <span class="cleaning-btn-text">数据清洗管道</span>
+          <template v-if="cleaningEnabled">
+            <span class="cleaning-badge">（清洗已启用）</span>
+            <el-icon class="cleaning-close" @click.stop="cleaningEnabled = false; cleaningConfig = null">
+              <Close />
+            </el-icon>
+          </template>
+        </span>
+      </el-button>
+
+      <!-- 操作按钮：执行全量分块并入库 / 清除 -->
+      <div v-if="uploadedFilename" class="action-buttons">
+        <el-button
+          type="primary"
+          size="large"
+          :loading="executing"
+          :disabled="!docId"
+          @click="handleExecute"
+          class="action-btn action-btn--start"
+        >
+          {{ executing ? '分块中...' : '执行全量分块并入库' }}
+        </el-button>
+        <el-button
+          type="danger"
+          size="large"
+          plain
+          @click="handleClear"
+          class="action-btn action-btn--clear"
+        >
+          清除
+        </el-button>
+      </div>
 
       <!-- 策略选择 -->
       <el-card shadow="hover" class="section-card">
@@ -398,31 +449,6 @@ function openRetrievalPanel() {
           </div>
         </template>
 
-        <el-button
-          type="primary"
-          :loading="executing"
-          :disabled="!docId"
-          @click="handleExecute"
-          style="width: 100%; margin-top: 16px"
-        >
-          执行全量分块并入库
-        </el-button>
-
-        <div v-if="cleaningEnabled" class="cleaning-status">
-          <el-tag type="success" size="small" effect="dark" closable @close="cleaningEnabled = false; cleaningConfig = null">
-            清洗已启用
-          </el-tag>
-        </div>
-
-        <el-button
-          type="info"
-          :icon="Brush"
-          @click="openCleaningDrawer"
-          style="width: 100%; margin-top: 8px"
-          plain
-        >
-          数据清洗管道
-        </el-button>
       </el-card>
     </el-col>
 
@@ -579,10 +605,25 @@ function openRetrievalPanel() {
   color: #606266;
 }
 
+.action-buttons {
+  display: flex;
+  gap: 12px;
+  margin-bottom: 16px;
+}
+
+.action-btn {
+  flex: 1;
+}
+
+.action-btn--start {
+  font-weight: 600;
+}
+
 .strategy-group {
   display: flex;
   flex-direction: column;
   gap: 8px;
+  align-items: flex-start;
 }
 
 .strategy-radio {
@@ -592,6 +633,10 @@ function openRetrievalPanel() {
   border: 1px solid #e4e7ed;
   border-radius: 6px;
   transition: border-color 0.2s;
+  width: 100%;
+  text-align: left;
+  white-space: normal;
+  word-break: break-all;
 }
 
 .strategy-radio:hover {
@@ -601,12 +646,14 @@ function openRetrievalPanel() {
 .strategy-label {
   font-weight: 600;
   font-size: 14px;
+  word-break: break-all;
 }
 
 .strategy-desc {
   font-size: 12px;
   color: #909399;
   margin-top: 2px;
+  word-break: break-all;
 }
 
 .preview-card {
@@ -742,9 +789,32 @@ function openRetrievalPanel() {
   padding: 40px 0;
 }
 
-.cleaning-status {
-  margin-top: 8px;
-  text-align: center;
+.cleaning-btn-content {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+}
+
+.cleaning-btn-text {
+  flex-shrink: 0;
+}
+
+.cleaning-badge {
+  font-size: 11px;
+  line-height: 1;
+  white-space: nowrap;
+}
+
+.cleaning-close {
+  font-size: 14px;
+  cursor: pointer;
+  margin-left: auto;
+  transition: color 0.2s;
+}
+
+.cleaning-close:hover {
+  color: #f56c6c;
 }
 
 .semantic-loading-tip {
@@ -788,5 +858,11 @@ function openRetrievalPanel() {
   background: #fafafa;
   border-radius: 4px;
   border-left: 3px solid #e4e7ed;
+  text-align: left;
+}
+
+/* 配置卡片内的表单项左对齐 */
+.section-card .el-form-item {
+  text-align: left;
 }
 </style>

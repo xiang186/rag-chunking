@@ -6,6 +6,9 @@ export type StrategyName =
   | 'markdown_structure'
   | 'pdf_table_layout'
   | 'parent_child'
+  | 'dialogue_aware'
+  | 'html_table'
+  | 'complex_table'
 
 export interface ParamSchemaItem {
   key: string

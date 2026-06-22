@@ -35,7 +35,7 @@ export async function previewChunks(
   docId: string,
   strategyName: StrategyName,
   params: Record<string, unknown>,
-  previewLimit: number = 500,
+  previewLimit: number = 10,
   cleaningConfig?: Record<string, unknown>,
 ): Promise<ChunkPreviewResponse> {
   // 语义分块需调用 OpenAI Embedding API，超时设为 3 分钟

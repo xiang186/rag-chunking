@@ -94,25 +94,19 @@ async def preview_chunks(
     all_chunks = run_chunking(text, strategy_name, params, file_path)
     total = len(all_chunks)
 
-    # 根据文档大小动态计算默认预览块数
-    # 小文档（≤10 块）：显示全部
-    # 中等文档（11~200 块）：显示 50%
-    # 大文档（>200 块）：显示 20%，最少 50 块
-    if total <= 10:
-        auto_limit = total
-    elif total <= 200:
-        auto_limit = max(10, int(total * 0.5))
-    else:
-        auto_limit = max(50, int(total * 0.2))
-
-    # 动态计算的预览数不超过前端请求的上限
-    limit = min(auto_limit, preview_limit)
+    # 预览块数 = 用户指定的上限（由前端预览块数控制）
+    limit = preview_limit
     preview_chunks_data = all_chunks[:limit]
 
     # 构建原文预览片段（覆盖所有预览块的范围）
     if preview_chunks_data:
         preview_end = max(c.char_end for c in preview_chunks_data)
-        source_preview = text[:min(preview_end + 200, len(text))]
+        # 如果所有 Chunk 的 char_end 都为 0（表格分块策略不追踪原文位置），
+        # 则退而使用完整文本，确保预览区域能看到所有分块内容
+        if preview_end == 0:
+            source_preview = text
+        else:
+            source_preview = text[:min(preview_end + 200, len(text))]
     else:
         source_preview = text[:2000]
 

@@ -17,6 +17,7 @@ from app.strategies.parent_child import ParentChildChunker
 from app.strategies.pdf_table_layout import PDFTableLayoutChunker
 from app.strategies.recursive_character import RecursiveCharacterChunker
 from app.strategies.semantic import SemanticChunker
+from app.strategies.table_chunker import HTMLTableChunker, ComplexHTMLTableChunker
 
 # 策略注册表：strategy_name -> Chunker 类
 STRATEGY_REGISTRY: Dict[str, Type[BaseChunker]] = {
@@ -26,6 +27,8 @@ STRATEGY_REGISTRY: Dict[str, Type[BaseChunker]] = {
     StrategyName.PDF_TABLE_LAYOUT: PDFTableLayoutChunker,
     StrategyName.PARENT_CHILD: ParentChildChunker,
     StrategyName.DIALOGUE_AWARE: DialogueAwareSemanticChunker,
+    StrategyName.HTML_TABLE: HTMLTableChunker,
+    StrategyName.COMPLEX_TABLE: ComplexHTMLTableChunker,
 }
 
 # 每种策略的默认参数和适用场景说明（供前端展示）
@@ -238,6 +241,62 @@ STRATEGY_META: Dict[str, Dict[str, Any]] = {
                 "type": "text",
                 "placeholder": "例如 gte-Qwen2",
                 "description": "用于生成文本向量的模型名称。对话体分块依赖 Embedding 判断语义连贯性。",
+            },
+        ],
+    },
+    StrategyName.HTML_TABLE: {
+        "label": "HTML 表格分块",
+        "description": "解析 HTML <table> 标签，按行转为自然语言描述，适合含表格的 Markdown/HTML",
+        "default_params": {
+            "enable_reference_resolution": True,
+            "template_style": "default",
+            "skip_empty_rows": True,
+        },
+        "param_schema": [
+            {
+                "key": "enable_reference_resolution",
+                "label": "跨行引用解析",
+                "type": "switch",
+                "description": "是否开启「同上」「特征同X行」等简写的自动引用解析。开启后，「特征同2层」会被替换为第2行的具体描述，使语义更完整。",
+            },
+            {
+                "key": "template_style",
+                "label": "模板风格",
+                "type": "select",
+                "options": ["default", "primary_key_based"],
+                "description": "生成自然语言的模板风格。「default」：通用模板，每行包含所有列描述；「primary_key_based」：主键模板，将第一列作为条目标识（如 ID/名称/层位），生成「关于【XX】的记录显示：列2为值2...」。",
+            },
+            {
+                "key": "skip_empty_rows",
+                "label": "跳过空行",
+                "type": "switch",
+                "description": "是否自动跳过全为空的无效行，减少无意义的 Chunk。",
+            },
+        ],
+    },
+    StrategyName.COMPLEX_TABLE: {
+        "label": "复杂多维表格分块",
+        "description": "解析多层合并单元格(rowspan/colspan)的复杂HTML表格，自动识别员工维度，适合企业绩效考核表/财务报表",
+        "default_params": {
+            "template_style": "indicator_split",
+            "max_field_length": 150,
+        },
+        "param_schema": [
+            {
+                "key": "template_style",
+                "label": "分块模式",
+                "type": "select",
+                "options": ["indicator_split", "weight_split"],
+                "description": "indicator_split：每个（员工×指标）生成独立Chunk；weight_split：按权重分组，同一权重下所有指标合并为一条Chunk（更符合评分场景）。",
+            },
+            {
+                "key": "max_field_length",
+                "label": "字段最大字符数",
+                "type": "slider",
+                "min": 0,
+                "max": 500,
+                "step": 10,
+                "description": "指标和考核标准字段的最大字符数，超出部分以「…」截断。设为 0 表示不截断。",
             },
         ],
     },
