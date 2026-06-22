@@ -44,8 +44,31 @@ export function useChunkPreview(
         cleaningConfig?.value ?? undefined,
       )
     } catch (e: unknown) {
-      const err = e as { code?: string; message?: string }
-      const msg = err?.message || '预览请求失败'
+      // 优先从 FastAPI 响应中提取详细错误信息
+      let msg = '预览请求失败'
+      try {
+        const axiosErr = e as { response?: { data?: any }; message?: string }
+        if (axiosErr?.response?.data) {
+          const detail = axiosErr.response.data
+          if (typeof detail === 'string') {
+            msg = detail
+          } else if (detail.detail) {
+            if (typeof detail.detail === 'string') {
+              msg = detail.detail
+            } else if (Array.isArray(detail.detail)) {
+              msg = detail.detail.map((d: any) => d.msg || JSON.stringify(d)).join('; ')
+            } else {
+              msg = JSON.stringify(detail.detail)
+            }
+          } else {
+            msg = JSON.stringify(detail)
+          }
+        } else if (axiosErr?.message) {
+          msg = axiosErr.message
+        }
+      } catch {
+        msg = '预览请求失败（解析错误详情时出错）'
+      }
 
       // 超时错误给出更友好的提示
       if (msg.includes('timeout')) {

@@ -11,8 +11,8 @@
 
 import { computed, onMounted, ref, watch } from 'vue'
 import { ElMessage } from 'element-plus'
-import { UploadFilled, Document, Setting, View, Loading, Brush, Close, Search as SearchIcon } from '@element-plus/icons-vue'
-import { fetchStrategies, uploadDocument, executeChunking, testEmbedding } from '@/api/documents'
+import { UploadFilled, Document, Setting, View, Loading, Brush, Close, Search as SearchIcon, DataAnalysis } from '@element-plus/icons-vue'
+import { fetchStrategies, uploadDocument, executeChunking, testEmbedding, analyzeTables } from '@/api/documents'
 import { useChunkPreview } from '@/composables/useChunkPreview'
 import LogPanel from '@/components/LogPanel.vue'
 import CleaningDrawer from '@/components/CleaningDrawer.vue'
@@ -262,7 +262,63 @@ async function handleTestEmbedding() {
   }
 }
 
-// ── 清洗配置 Drawer ──
+// ── 表格列映射配置（table_config 策略） ──
+const tableAnalysis = ref<Record<string, any> | null>(null)
+const analyzingTable = ref(false)
+
+/** 从后端获取表格结构分析结果 */
+async function handleAnalyzeTables() {
+  if (!docId.value) {
+    ElMessage.warning('请先上传文档')
+    return
+  }
+  analyzingTable.value = true
+  try {
+    tableAnalysis.value = await analyzeTables(docId.value)
+    ElMessage.success(`分析完成: 共 ${tableAnalysis.value.total_tables} 个表格`)
+    // 分析完成后自动触发一次预览（如果已有列映射配置）
+    setTimeout(() => onColumnMappingChange(), 100)
+  } catch {
+    ElMessage.error('表格分析失败')
+  } finally {
+    analyzingTable.value = false
+  }
+}
+
+/** 列映射配置变化时，自动触发预览（不等待手动点击执行） */
+function onColumnMappingChange() {
+  const emp = Number(strategyParams.value.employee_col)
+  const score = Number(strategyParams.value.score_col)
+  if (emp >= 0 && score >= 0) {
+    // 使用防抖预览，避免快速切换时频繁请求
+    debouncedPreview()
+  }
+}
+
+/** 列角色对应的标签颜色 */
+function roleTagType(role: string): string {
+  const map: Record<string, string> = {
+    employee: 'success',
+    score: 'danger',
+    reason: 'warning',
+    dimension: 'info',
+    unknown: '',
+  }
+  return map[role] || ''
+}
+
+/** 列角色显示文本 */
+function roleLabel(role: string): string {
+  const map: Record<string, string> = {
+    employee: '员工',
+    score: '评分',
+    reason: '理由',
+    dimension: '维度',
+    unknown: '未知',
+  }
+  return map[role] || role
+}
+
 const cleaningDrawerRef = ref<InstanceType<typeof CleaningDrawer> | null>(null)
 
 function openCleaningDrawer() {
@@ -450,6 +506,97 @@ function openRetrievalPanel() {
         </template>
 
       </el-card>
+
+      <!-- 表格列映射配置（table_config 策略） -->
+      <el-card v-if="selectedStrategy === 'table_config' && docId" shadow="hover" class="section-card">
+        <template #header>
+          <el-icon><DataAnalysis /></el-icon>
+          表格列映射
+        </template>
+
+        <el-button
+          type="primary"
+          size="small"
+          :loading="analyzingTable"
+          @click="handleAnalyzeTables"
+          style="margin-bottom: 12px"
+        >
+          {{ analyzingTable ? '分析中...' : '分析表格结构' }}
+        </el-button>
+
+        <div v-if="tableAnalysis && tableAnalysis.tables && tableAnalysis.tables.length > 0">
+          <div class="table-preview-info">
+            <span>共 {{ tableAnalysis.total_tables }} 个表格</span>
+            <span style="margin-left: 12px">当前配置: 表格 1</span>
+          </div>
+
+          <!-- 列映射表格（简化版） -->
+          <div class="column-mapping-grid">
+            <div
+              v-for="col in tableAnalysis.tables[0].columns"
+              :key="col.col_index"
+              class="column-mapping-item"
+              :class="'role-' + col.suggested_role"
+            >
+              <div class="col-header">
+                <span class="col-index">列 {{ col.col_index }}</span>
+                <el-tag size="small" :type="roleTagType(col.suggested_role)" class="col-role-tag">
+                  {{ roleLabel(col.suggested_role) }}
+                </el-tag>
+              </div>
+              <div class="col-samples">
+                <div v-for="(val, vi) in col.sample_values.slice(0, 3)" :key="vi" class="col-sample">
+                  {{ val || '(空)' }}
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <el-divider style="margin: 12px 0" />
+
+          <el-form label-position="top" size="small">
+            <el-form-item label="员工姓名列">
+              <el-select v-model="strategyParams.employee_col" placeholder="选择员工列" style="width: 100%" @change="onColumnMappingChange">
+                <el-option
+                  v-for="col in tableAnalysis.tables[0].columns"
+                  :key="col.col_index"
+                  :value="col.col_index"
+                  :label="`列${col.col_index}: ${col.sample_values[0] || ''} / ${col.sample_values[1] || ''}`"
+                />
+              </el-select>
+            </el-form-item>
+            <el-form-item label="评分列">
+              <el-select v-model="strategyParams.score_col" placeholder="选择评分列" style="width: 100%" @change="onColumnMappingChange">
+                <el-option
+                  v-for="col in tableAnalysis.tables[0].columns"
+                  :key="col.col_index"
+                  :value="col.col_index"
+                  :label="`列${col.col_index}: ${col.sample_values[0] || ''} / ${col.sample_values[1] || ''}`"
+                />
+              </el-select>
+            </el-form-item>
+            <el-form-item label="评分理由列（选填）">
+              <el-select v-model="strategyParams.reason_col" placeholder="选择理由列（可选）" style="width: 100%" clearable @change="onColumnMappingChange">
+                <el-option
+                  v-for="col in tableAnalysis.tables[0].columns"
+                  :key="col.col_index"
+                  :value="col.col_index"
+                  :label="`列${col.col_index}: ${col.sample_values[0] || ''} / ${col.sample_values[1] || ''}`"
+                />
+                <el-option :value="-1" label="无评分理由列" />
+              </el-select>
+            </el-form-item>
+            <el-form-item label="跳过表头行数">
+              <el-input-number v-model="strategyParams.skip_rows" :min="0" :max="10" :step="1" style="width: 100%" @change="onColumnMappingChange" />
+            </el-form-item>
+          </el-form>
+        </div>
+
+        <div v-else-if="tableAnalysis && tableAnalysis.tables && tableAnalysis.tables.length === 0" class="empty-analysis">
+          <el-empty description="文档中未找到 HTML 表格" />
+        </div>
+      </el-card>
+
     </el-col>
 
     <!-- 右侧：预览区域 -->
@@ -864,5 +1011,69 @@ function openRetrievalPanel() {
 /* 配置卡片内的表单项左对齐 */
 .section-card .el-form-item {
   text-align: left;
+}
+
+/* ── 表格列映射卡片 ── */
+.table-preview-info {
+  font-size: 13px;
+  color: #606266;
+  margin-bottom: 12px;
+}
+
+.column-mapping-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(140px, 1fr));
+  gap: 8px;
+  margin-bottom: 8px;
+}
+
+.column-mapping-item {
+  border: 1px solid #e4e7ed;
+  border-radius: 6px;
+  padding: 8px;
+  font-size: 12px;
+}
+
+.column-mapping-item.role-employee {
+  border-color: #67c23a;
+}
+
+.column-mapping-item.role-score {
+  border-color: #f56c6c;
+}
+
+.column-mapping-item.role-reason {
+  border-color: #e6a23c;
+}
+
+.col-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 6px;
+}
+
+.col-index {
+  font-weight: 600;
+  font-size: 12px;
+}
+
+.col-role-tag {
+  font-size: 10px;
+}
+
+.col-samples {
+  color: #909399;
+  line-height: 1.5;
+}
+
+.col-sample {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.empty-analysis {
+  padding: 20px 0;
 }
 </style>

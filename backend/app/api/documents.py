@@ -1,6 +1,7 @@
 """文档相关 API 路由。"""
 
 import asyncio
+import logging
 import time
 
 from fastapi import APIRouter, Depends, HTTPException, UploadFile, File
@@ -128,6 +129,15 @@ async def preview_document_chunks(
 
     if not doc.content_text:
         raise HTTPException(status_code=400, detail="文档内容为空，无法分块")
+
+    # 临时调试日志
+    logger = logging.getLogger(__name__)
+    logger.info(
+        "Preview request: strategy=%s params_keys=%s preview_limit=%s",
+        request.strategy_name,
+        list(request.params.keys()) if request.params else "empty",
+        request.preview_limit,
+    )
 
     return await preview_chunks(
         doc_id=doc_id,
