@@ -1851,25 +1851,49 @@ class ConfigTableChunker(BaseChunker):
         results: List[ChunkResult] = []
 
         mapping = self._build_mapping()
-        if not mapping.is_valid():
+        if not mapping.is_valid() or not tables:
             return results
 
-        current_group = ""
-        table_index = 0
+        # 扫描所有顶层元素，为每个 table 捕获其前的组名
+        group_name = ""
+        table_idx = 0
         for elem in soup.children:
-            if hasattr(elem, "get_text"):
-                t = elem.get_text(strip=True)
-                if t.startswith("# "):
-                    current_group = t[2:].strip()
-            if getattr(elem, "name", None) == "table" and table_index < len(tables):
-                chunks = self._process_table(str(elem), mapping, current_group)
+            text_content = elem.get_text(strip=True) if hasattr(elem, "get_text") else ""
+            if text_content.startswith("# "):
+                group_name = text_content.lstrip("# ").strip()
+            elif hasattr(elem, "name") and elem.name in ("h1", "h2", "h3"):
+                group_name = text_content
+
+            if getattr(elem, "name", None) == "table" and table_idx < len(tables):
+                chunks = self._process_table(str(elem), mapping, group_name)
                 for c in chunks:
                     results.append(ChunkResult(
                         text=c["content"],
                         metadata=c["metadata"],
                         char_start=0, char_end=0,
                     ))
-                table_index += 1
+                table_idx += 1
+
+        # 兜底：如果上面的遍历没找到所有 table，用 find_all 方式处理剩余
+        if table_idx < len(tables):
+            # 重新扫描获取组名映射
+            group_map = {}
+            current_grp = ""
+            for child in soup.children:
+                t = child.get_text(strip=True) if hasattr(child, "get_text") else ""
+                if t.startswith("# ") or (hasattr(child, "name") and child.name in ("h1", "h2", "h3")):
+                    current_grp = t.lstrip("# ").strip() if t.startswith("# ") else t
+                if getattr(child, "name", None) == "table":
+                    group_map[id(child)] = current_grp
+            for tbl in tables[table_idx:]:
+                grp = group_map.get(id(tbl), "")
+                chunks = self._process_table(str(tbl), mapping, grp)
+                for c in chunks:
+                    results.append(ChunkResult(
+                        text=c["content"],
+                        metadata=c["metadata"],
+                        char_start=0, char_end=0,
+                    ))
         return results
 
     def _build_mapping(self) -> ColumnMapping:

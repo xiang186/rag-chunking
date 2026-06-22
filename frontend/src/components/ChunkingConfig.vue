@@ -285,13 +285,14 @@ async function handleAnalyzeTables() {
   }
 }
 
-/** 列映射配置变化时，自动触发预览（不等待手动点击执行） */
+/** 列映射配置变化时，自动触发预览 */
 function onColumnMappingChange() {
   const emp = Number(strategyParams.value.employee_col)
   const score = Number(strategyParams.value.score_col)
+  // 调试日志
+  console.log('onColumnMappingChange', { emp, score, params: strategyParams.value })
   if (emp >= 0 && score >= 0) {
-    // 使用防抖预览，避免快速切换时频繁请求
-    debouncedPreview()
+    fetchPreview()
   }
 }
 
