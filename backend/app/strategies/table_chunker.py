@@ -1811,15 +1811,17 @@ class ComplexHTMLTableChunker(BaseChunker):
 
 @dataclass
 class ColumnMapping:
-    """用户配置的列映射关系。"""
-    employee_col: int = -1
-    score_col: int = -1
-    reason_col: int = -1
+    """用户配置的列映射关系（新版：数据列可动态命名）。"""
+    data_columns: Optional[List[Dict[str, Any]]] = None  # [{name:"评分", col:9}, ...]
     metadata_cols: Optional[List[int]] = None
     skip_rows: int = 0
+    selected_table_index: int = 0
+    employee_mode: bool = False  # 按员工聚合
 
     def is_valid(self) -> bool:
-        return self.employee_col >= 0 and self.score_col >= 0
+        if self.employee_mode:
+            return True
+        return bool(self.data_columns) and len(self.data_columns) > 0
 
 
 def _strip_cell(val: str) -> str:
@@ -1846,6 +1848,7 @@ class ConfigTableChunker(BaseChunker):
 
     def chunk(self, text: str, **kwargs: Any) -> List[ChunkResult]:
         from bs4 import BeautifulSoup
+        from bs4.element import NavigableString
         soup = BeautifulSoup(text, "html.parser")
         tables = soup.find_all("table")
         results: List[ChunkResult] = []
@@ -1854,56 +1857,49 @@ class ConfigTableChunker(BaseChunker):
         if not mapping.is_valid() or not tables:
             return results
 
-        # 扫描所有顶层元素，为每个 table 捕获其前的组名
+        selected_table_index = int(self.params.get("selected_table_index", 0) or 0)
+        if selected_table_index < 0 or selected_table_index >= len(tables):
+            logger.warning(
+                "table_config: selected_table_index %s 超出范围 [0, %s)",
+                selected_table_index,
+                len(tables),
+            )
+            return results
+
+        # 只处理选中的表格；按文档顺序遍历，遇到目标表格时处理并结束
+        # 同时收集目标表格前最近的标题作为 group_name（兼容 Markdown # 文本和 HTML heading）
         group_name = ""
         table_idx = 0
-        for elem in soup.children:
-            text_content = elem.get_text(strip=True) if hasattr(elem, "get_text") else ""
-            if text_content.startswith("# "):
-                group_name = text_content.lstrip("# ").strip()
-            elif hasattr(elem, "name") and elem.name in ("h1", "h2", "h3"):
-                group_name = text_content
+        for elem in soup.descendants:
+            if isinstance(elem, NavigableString):
+                text_content = str(elem).strip()
+                if text_content.startswith("# "):
+                    group_name = text_content.lstrip("# ").strip()
+            elif getattr(elem, "name", None) in ("h1", "h2", "h3"):
+                group_name = elem.get_text(strip=True)
 
-            if getattr(elem, "name", None) == "table" and table_idx < len(tables):
-                chunks = self._process_table(str(elem), mapping, group_name)
-                for c in chunks:
-                    results.append(ChunkResult(
-                        text=c["content"],
-                        metadata=c["metadata"],
-                        char_start=0, char_end=0,
-                    ))
+            if getattr(elem, "name", None) == "table":
+                if table_idx == selected_table_index:
+                    chunks = self._process_table(str(elem), mapping, group_name)
+                    for c in chunks:
+                        results.append(ChunkResult(
+                            text=c["content"],
+                            metadata=c["metadata"],
+                            char_start=0, char_end=0,
+                        ))
+                    break
                 table_idx += 1
 
-        # 兜底：如果上面的遍历没找到所有 table，用 find_all 方式处理剩余
-        if table_idx < len(tables):
-            # 重新扫描获取组名映射
-            group_map = {}
-            current_grp = ""
-            for child in soup.children:
-                t = child.get_text(strip=True) if hasattr(child, "get_text") else ""
-                if t.startswith("# ") or (hasattr(child, "name") and child.name in ("h1", "h2", "h3")):
-                    current_grp = t.lstrip("# ").strip() if t.startswith("# ") else t
-                if getattr(child, "name", None) == "table":
-                    group_map[id(child)] = current_grp
-            for tbl in tables[table_idx:]:
-                grp = group_map.get(id(tbl), "")
-                chunks = self._process_table(str(tbl), mapping, grp)
-                for c in chunks:
-                    results.append(ChunkResult(
-                        text=c["content"],
-                        metadata=c["metadata"],
-                        char_start=0, char_end=0,
-                    ))
         return results
 
     def _build_mapping(self) -> ColumnMapping:
         p = self.params
         return ColumnMapping(
-            employee_col=int(p.get("employee_col", -1)),
-            score_col=int(p.get("score_col", -1)),
-            reason_col=int(p.get("reason_col", -1)),
+            data_columns=p.get("data_columns", None),
             metadata_cols=p.get("metadata_cols", None),
             skip_rows=int(p.get("skip_rows", 0)),
+            selected_table_index=int(p.get("selected_table_index", 0)),
+            employee_mode=bool(p.get("employee_mode", False)),
         )
 
     def _process_table(
@@ -1912,39 +1908,299 @@ class ConfigTableChunker(BaseChunker):
         hdf, ddf = self.restorer.restore(table_html)
         if ddf.empty:
             return []
-        if mapping.skip_rows > 0 and mapping.skip_rows < ddf.shape[0]:
-            ddf = ddf.iloc[mapping.skip_rows:].reset_index(drop=True)
+
+        column_headers = self._extract_column_headers(hdf, ddf, mapping.skip_rows)
+
+        if mapping.employee_mode:
+            group_column_keyword = str(self.params.get("group_column_keyword", "姓名") or "姓名")
+            return self._process_table_employee_mode(
+                hdf, ddf, mapping, group_name, group_column_keyword, column_headers
+            )
+
+        # 构建行列结合矩阵（hdf 行 + ddf 行，统一索引）
+        # 每个元素是单元格清洗后的文本
+        combined_rows: List[List[str]] = []
+        ncols = max(hdf.shape[1] if not hdf.empty else 0, ddf.shape[1])
+        if not hdf.empty:
+            for r in range(hdf.shape[0]):
+                row = [str(hdf.iloc[r, c]) if c < hdf.shape[1] else "" for c in range(ncols)]
+                combined_rows.append(row)
+        if not ddf.empty:
+            for r in range(ddf.shape[0]):
+                row = [str(ddf.iloc[r, c]) if c < ddf.shape[1] else "" for c in range(ncols)]
+                combined_rows.append(row)
+
+        if not combined_rows:
+            return []
+
+        # 数据行起始索引 = hdf 行数 + skip_rows
+        data_start = (hdf.shape[0] if not hdf.empty else 0) + mapping.skip_rows
 
         meta_cols = mapping.metadata_cols or []
+        data_cols = mapping.data_columns or []
         chunks: List[Dict[str, Any]] = []
 
-        for _, row_data in ddf.iterrows():
-            emp = str(row_data.iloc[mapping.employee_col]) if mapping.employee_col < len(row_data) else ""
-            score = str(row_data.iloc[mapping.score_col]) if mapping.score_col < len(row_data) else ""
-            reason = str(row_data.iloc[mapping.reason_col]) if mapping.reason_col >= 0 and mapping.reason_col < len(row_data) else ""
+        for data_idx in range(data_start, len(combined_rows)):
+            current_row = combined_rows[data_idx]
+            dc_parts = []
+            metadata: Dict[str, Any] = {}
 
-            emp = _strip_cell(emp)
-            score = _strip_cell(score)
-            reason = _strip_cell(reason)
+            for dc in data_cols:
+                col = int(dc.get("col", -1))
+                name = dc.get("name", f"col_{col}")
+                if col < 0 or col >= len(current_row):
+                    continue
 
-            if not emp or not score or score in ("nan", "", "/", "-"):
+                # row 字段存在 → 固定行列读取；否则从当前数据行读取
+                # 用户输入行号为 1-based（与 Excel 一致），内部转换为 0-based
+                if "row" in dc and dc["row"] is not None and str(dc["row"]).strip():
+                    try:
+                        target_row = int(dc["row"]) - 1
+                    except (ValueError, TypeError):
+                        target_row = data_idx
+                    if target_row < len(combined_rows) and col < len(combined_rows[target_row]):
+                        val = _strip_cell(combined_rows[target_row][col])
+                    else:
+                        continue
+                else:
+                    val = _strip_cell(current_row[col])
+
+                if not val or val in ("nan", "", "/", "-"):
+                    continue
+                dc_parts.append(f"{name}：{val}")
+                try:
+                    metadata[name] = float(val.replace("分", ""))
+                except (ValueError, TypeError):
+                    metadata[name] = val
+
+            if not dc_parts:
                 continue
 
-            content = f"员工【{emp}】得分为【{score}】分"
-            if reason and reason not in ("nan", "", "/", "-"):
-                content += f"，评分理由：【{reason}】"
-            content += "。"
+            content = "，".join(dc_parts) + "。"
 
-            metadata: Dict[str, Any] = {"employee_name": emp, "score": _try_float(score)}
             if group_name:
                 metadata["group_name"] = group_name
             for mc in meta_cols:
-                if mc < len(row_data):
-                    val = _strip_cell(str(row_data.iloc[mc]))
+                if mc < len(current_row):
+                    val = _strip_cell(current_row[mc])
                     if val and val != "nan":
-                        metadata[f"col_{mc}"] = val
+                        metadata[column_headers.get(mc, f"col_{mc}")] = val
 
             chunks.append({"content": content, "metadata": metadata})
+        return chunks
+
+    def _extract_column_headers(
+        self, header_df: pd.DataFrame, data_df: pd.DataFrame, skip_rows: int
+    ) -> Dict[int, str]:
+        """
+        从 header_df 和 data_df 顶部被 skip_rows 跳过的行中提取每列的表头名称。
+        多行表头时，优先取最下面一行的非空值；没有则回退到 col_X。
+        """
+        candidate_rows: List[List[str]] = []
+
+        if not header_df.empty:
+            for r in range(header_df.shape[0]):
+                candidate_rows.append(
+                    [str(header_df.iloc[r, c]) for c in range(header_df.shape[1])]
+                )
+
+        # 实际列名有时在 data_df 顶部被 skip_rows 跳过的行里（例如非全部 <th> 的表头行）
+        if not data_df.empty and skip_rows > 0:
+            for r in range(min(skip_rows, data_df.shape[0])):
+                candidate_rows.append(
+                    [str(data_df.iloc[r, c]) for c in range(data_df.shape[1])]
+                )
+
+        if not candidate_rows:
+            return {}
+
+        ncols = max(len(r) for r in candidate_rows)
+        headers: Dict[int, str] = {}
+        for col_idx in range(ncols):
+            name = ""
+            # 从下到上找第一个非空值
+            for row_idx in range(len(candidate_rows) - 1, -1, -1):
+                if col_idx < len(candidate_rows[row_idx]):
+                    val = _strip_cell(candidate_rows[row_idx][col_idx])
+                    if val and val not in ("nan", ""):
+                        name = val
+                        break
+            headers[col_idx] = name if name else f"col_{col_idx}"
+        return headers
+
+    def _process_table_employee_mode(
+        self,
+        hdf: pd.DataFrame,
+        ddf: pd.DataFrame,
+        mapping: ColumnMapping,
+        group_name: str = "",
+        group_column_keyword: str = "姓名",
+        column_headers: Dict[int, str] = None,
+    ) -> List[Dict[str, Any]]:
+        """
+        按员工聚合模式：用户配置多个数据列，其中列名包含 group_column_keyword 的为分组依
+        据列，每个分组列及其后的数据列组成一个员工组，每组生成一条 Chunk。
+
+        关键约定：
+        - 列名包含 group_column_keyword（默认为「姓名」）的 data_column 标志一个员工组的开始；
+        - 两个分组列之间的其他 data_column 属于前一个员工组；
+        - 每个指定了固定行号（row）的 data_column 被视为一条独立条目，
+          其值和元数据都从该固定行读取；
+        - 未指定行号的 data_column 按数据行迭代。
+
+        输出内容会把同一行的评分值与该行的元数据（考核模块、指标、权重、理由等）组合为
+        自然语言记录，方便大模型直接回答「某员工在某考核项下得分多少、理由是什么」。
+        """
+        if column_headers is None:
+            column_headers = {}
+
+        # 构建行列结合矩阵
+        combined_rows: List[List[str]] = []
+        ncols = max(hdf.shape[1] if not hdf.empty else 0, ddf.shape[1])
+        if not hdf.empty:
+            for r in range(hdf.shape[0]):
+                row = [str(hdf.iloc[r, c]) if c < hdf.shape[1] else "" for c in range(ncols)]
+                combined_rows.append(row)
+        if not ddf.empty:
+            for r in range(ddf.shape[0]):
+                row = [str(ddf.iloc[r, c]) if c < ddf.shape[1] else "" for c in range(ncols)]
+                combined_rows.append(row)
+
+        if not combined_rows:
+            return []
+
+        meta_cols = mapping.metadata_cols or []
+        data_cols = mapping.data_columns or []
+        if not data_cols:
+            logger.warning("employee_mode: data_columns 为空")
+            return []
+
+        keyword_lower = group_column_keyword.strip().lower()
+
+        def _is_name_col(dc: Dict[str, Any]) -> bool:
+            dn = dc.get("name", "").strip().lower()
+            return keyword_lower in dn if keyword_lower else False
+
+        # 找到所有分组列的索引；没有则退回到第一列
+        name_indices = [i for i, dc in enumerate(data_cols) if _is_name_col(dc)]
+        if not name_indices:
+            name_indices = [0]
+
+        # 按姓名列切分员工组：每个姓名列 + 其后到下一个姓名列之前的列
+        groups: List[Tuple[Dict[str, Any], List[Dict[str, Any]]]] = []
+        for i, idx in enumerate(name_indices):
+            name_dc = data_cols[idx]
+            end_idx = name_indices[i + 1] if i + 1 < len(name_indices) else len(data_cols)
+            value_dcs = data_cols[idx + 1:end_idx]
+            groups.append((name_dc, value_dcs))
+
+        logger.info("employee_mode: 发现 %s 个员工组", len(groups))
+
+        def _read_value(dc: Dict[str, Any], data_idx: int) -> Tuple[str, int]:
+            col = int(dc.get("col", -1))
+            if col < 0 or col >= ncols:
+                return "", -1
+            if "row" in dc and dc["row"] is not None and str(dc["row"]).strip():
+                try:
+                    # 用户输入行号为 1-based（与 Excel 一致），内部转换为 0-based
+                    target_row = int(dc["row"]) - 1
+                except (ValueError, TypeError):
+                    target_row = data_idx
+            else:
+                target_row = data_idx
+            if target_row < 0 or target_row >= len(combined_rows) or col >= len(combined_rows[target_row]):
+                return "", -1
+            val = _strip_cell(combined_rows[target_row][col])
+            return val, target_row
+
+        def _read_metadata(source_row: int) -> Dict[str, Any]:
+            meta: Dict[str, Any] = {}
+            if source_row < 0 or source_row >= len(combined_rows):
+                return meta
+            row = combined_rows[source_row]
+            for mc in meta_cols:
+                if mc < len(row):
+                    mv = _strip_cell(row[mc])
+                    if mv and mv != "nan":
+                        meta[column_headers.get(mc, f"col_{mc}")] = mv
+            return meta
+
+        chunks: List[Dict[str, Any]] = []
+        for group_idx, (name_dc, value_dcs) in enumerate(groups):
+            # ── 姓名值优先从用户配置的 value 字段获取，不再从表格读取 ──
+            name_val = name_dc.get("value", "").strip()
+            if name_val and name_val not in ("nan", "", "/", "-"):
+                logger.info("employee_mode: 员工组 %s 使用用户手动填写的姓名: %s", group_idx, name_val)
+            else:
+                # 兼容旧配置：如果用户未填写 value，从表格读取
+                name_val, _ = _read_value(name_dc, -1)
+                if name_val and name_val not in ("nan", "", "/", "-"):
+                    logger.info("employee_mode: 员工组 %s 从表格读取姓名: %s", group_idx, name_val)
+                else:
+                    logger.warning("employee_mode: 员工组 %s 姓名读取为空（请检查配置）", group_idx)
+                    continue
+
+            metadata: Dict[str, Any] = {"name": name_val}
+            if group_name:
+                metadata["group_name"] = group_name
+
+            # 收集每个条目：按 source_row 分组，同一条目合并多个 data_column 值
+            records: Dict[int, Dict[str, Any]] = {}
+            item_idx = 0
+            for dc in value_dcs:
+                col_name = dc.get("name", column_headers.get(dc.get("col", -1), f"col_{dc.get('col', -1)}"))
+                has_fixed_row = "row" in dc and dc["row"] is not None and str(dc["row"]).strip()
+
+                if has_fixed_row:
+                    val, source_row = _read_value(dc, -1)
+                    if not val or val in ("nan", "", "/", "-"):
+                        continue
+                    meta = _read_metadata(source_row)
+                    if source_row not in records:
+                        records[source_row] = {"values": {}, "meta": meta, "item_idx": item_idx}
+                        item_idx += 1
+                    records[source_row]["values"][col_name] = val
+                    # 元数据平铺到顶层，便于前端展示
+                    for k, v in meta.items():
+                        metadata[f"{col_name}_{records[source_row]['item_idx']}_{k}"] = v
+                else:
+                    data_start = (hdf.shape[0] if not hdf.empty else 0) + mapping.skip_rows
+                    for data_idx in range(data_start, len(combined_rows)):
+                        val, source_row = _read_value(dc, data_idx)
+                        if not val or val in ("nan", "", "/", "-"):
+                            continue
+                        meta = _read_metadata(source_row)
+                        if source_row not in records:
+                            records[source_row] = {"values": {}, "meta": meta, "item_idx": item_idx}
+                            item_idx += 1
+                        records[source_row]["values"][col_name] = val
+                        for k, v in meta.items():
+                            metadata[f"{col_name}_{records[source_row]['item_idx']}_{k}"] = v
+
+            if not records:
+                logger.warning("employee_mode: 员工组 %s 没有有效评分数据", group_idx)
+                continue
+
+            # 生成自然语言 content
+            content_parts = [f"姓名：{name_val}"]
+            for record_idx, source_row in enumerate(sorted(records.keys())):
+                record = records[source_row]
+                meta = record["meta"]
+                values = record["values"]
+                record_desc_parts = []
+                # 先输出元数据描述
+                for k, v in meta.items():
+                    record_desc_parts.append(f"{k}为「{v}」")
+                # 再输出 data_column 值
+                for k, v in values.items():
+                    record_desc_parts.append(f"{k}为「{v}」")
+                content_parts.append(f"考核记录{record_idx + 1}：" + "，".join(record_desc_parts) + "。")
+
+            content = "".join(content_parts)
+            chunks.append({"content": content, "metadata": metadata})
+            logger.info("employee_mode: 员工组 %s 生成 Chunk, name=%s, items=%s", group_idx, name_val, len(records))
+
+        logger.info("employee_mode: 共生成 %s 条 Chunk", len(chunks))
         return chunks
 
 

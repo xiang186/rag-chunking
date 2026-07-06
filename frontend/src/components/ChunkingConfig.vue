@@ -35,7 +35,7 @@ const activeChunkIndex = ref<number | null>(null)
 const savedParamsPerStrategy = ref<Record<string, Record<string, unknown>>>({})
 
 // ── 预览块数上限：跟随当前文档总块数 ──
-const maxPreviewLimit = computed(() => previewData.value?.total_chunks ?? 500)
+const maxPreviewLimit = computed(() => Math.max(1, previewData.value?.total_chunks ?? 500))
 
 // 修正非法预览块数：≤0 / NaN / 超出上限时自动纠正
 function clampPreviewLimit() {
@@ -110,7 +110,8 @@ watch(strategyParams, (val) => {
 // 预览数据变化时，确保 previewLimit 不超过 total_chunks
 watch(maxPreviewLimit, (newMax) => {
   if (previewLimit.value > newMax) {
-    previewLimit.value = newMax
+    // 确保最小值为 1（当 total_chunks=0 时不把 previewLimit 降到 0）
+    previewLimit.value = Math.max(1, newMax)
   }
 })
 
@@ -266,6 +267,75 @@ async function handleTestEmbedding() {
 const tableAnalysis = ref<Record<string, any> | null>(null)
 const analyzingTable = ref(false)
 
+/** 当前选中的表格索引 */
+const selectedTableIndex = computed(() => {
+  return Number(strategyParams.value.selected_table_index ?? 0)
+})
+
+/** 数据列数组（双向绑定到 strategyParams.data_columns） */
+const dataColumns = computed({
+  get: () => {
+    const arr = strategyParams.value.data_columns
+    return Array.isArray(arr) ? arr : []
+  },
+  set: (val) => {
+    strategyParams.value.data_columns = val
+  },
+})
+
+// 每个表格独立保存的数据列和元数据列配置（切换表格时恢复）
+const tableConfigs = ref<Record<number, { data_columns: any[]; metadata_cols: any[] }>>({})
+
+/** 添加一个空数据列 */
+function addDataColumn() {
+  const cols = [...dataColumns.value, { name: '', col: undefined }]
+  dataColumns.value = cols
+}
+
+/** 删除指定数据列 */
+function removeDataColumn(index: number) {
+  const cols = dataColumns.value.filter((_: any, i: number) => i !== index)
+  dataColumns.value = cols
+  onDataColumnsChange()
+}
+
+/** 数据列变更时触发预览 */
+function onDataColumnsChange() {
+  // 强制更新 data_columns
+  strategyParams.value.data_columns = [...dataColumns.value]
+  onColumnMappingChange()
+}
+
+/** 保存当前表格的配置 */
+function saveTableConfig() {
+  const idx = selectedTableIndex.value
+  tableConfigs.value[idx] = {
+    data_columns: JSON.parse(JSON.stringify(dataColumns.value)),
+    metadata_cols: JSON.parse(JSON.stringify(strategyParams.value.metadata_cols || [])),
+  }
+  ElMessage.success(`表格 ${idx + 1} 的配置已保存`)
+}
+
+/** 判断当前表格是否已保存配置 */
+function hasSavedTableConfig(index: number): boolean {
+  return !!tableConfigs.value[index]
+}
+
+/** 切换表格时更新 selected_table_index 并触发预览 */
+function onTableChange() {
+  const idx = selectedTableIndex.value
+  const saved = tableConfigs.value[idx]
+  if (saved) {
+    strategyParams.value.data_columns = JSON.parse(JSON.stringify(saved.data_columns))
+    strategyParams.value.metadata_cols = JSON.parse(JSON.stringify(saved.metadata_cols))
+  } else {
+    // 清除之前的数据列配置
+    strategyParams.value.data_columns = []
+    strategyParams.value.metadata_cols = []
+  }
+  onColumnMappingChange()
+}
+
 /** 从后端获取表格结构分析结果 */
 async function handleAnalyzeTables() {
   if (!docId.value) {
@@ -274,7 +344,8 @@ async function handleAnalyzeTables() {
   }
   analyzingTable.value = true
   try {
-    tableAnalysis.value = await analyzeTables(docId.value)
+    const skipRows = Number(strategyParams.value.skip_rows ?? 0)
+    tableAnalysis.value = await analyzeTables(docId.value, skipRows)
     ElMessage.success(`分析完成: 共 ${tableAnalysis.value.total_tables} 个表格`)
     // 分析完成后自动触发一次预览（如果已有列映射配置）
     setTimeout(() => onColumnMappingChange(), 100)
@@ -287,11 +358,11 @@ async function handleAnalyzeTables() {
 
 /** 列映射配置变化时，自动触发预览 */
 function onColumnMappingChange() {
-  const emp = Number(strategyParams.value.employee_col)
-  const score = Number(strategyParams.value.score_col)
-  // 调试日志
-  console.log('onColumnMappingChange', { emp, score, params: strategyParams.value })
-  if (emp >= 0 && score >= 0) {
+  const dcs = strategyParams.value.data_columns
+  const hasValid = Array.isArray(dcs) && dcs.some((dc: any) => dc.col >= 0 && dc.name)
+  const employeeMode = strategyParams.value.employee_mode
+  console.log('onColumnMappingChange', { hasValid, employeeMode, dataCols: dcs })
+  if (hasValid || employeeMode) {
     fetchPreview()
   }
 }
@@ -318,6 +389,18 @@ function roleLabel(role: string): string {
     unknown: '未知',
   }
   return map[role] || role
+}
+
+/** 将 0-based 列索引转换为 Excel 列字母（0→A, 1→B, 25→Z, 26→AA） */
+function columnIndexToLetter(index: number): string {
+  let result = ''
+  let n = index + 1
+  while (n > 0) {
+    n--
+    result = String.fromCharCode(65 + (n % 26)) + result
+    n = Math.floor(n / 26)
+  }
+  return result
 }
 
 const cleaningDrawerRef = ref<InstanceType<typeof CleaningDrawer> | null>(null)
@@ -457,6 +540,7 @@ function openRetrievalPanel() {
             <el-switch
               v-else-if="param.type === 'switch'"
               v-model="strategyParams[param.key]"
+              @change="onColumnMappingChange"
             />
             <!-- Select -->
             <el-select
@@ -520,27 +604,37 @@ function openRetrievalPanel() {
           size="small"
           :loading="analyzingTable"
           @click="handleAnalyzeTables"
-          style="margin-bottom: 12px"
+          style="margin-bottom: 12px; width: 100%"
         >
           {{ analyzingTable ? '分析中...' : '分析表格结构' }}
         </el-button>
 
         <div v-if="tableAnalysis && tableAnalysis.tables && tableAnalysis.tables.length > 0">
-          <div class="table-preview-info">
-            <span>共 {{ tableAnalysis.total_tables }} 个表格</span>
-            <span style="margin-left: 12px">当前配置: 表格 1</span>
-          </div>
+          <!-- 表格选择 -->
+          <el-form-item label="选择表格">
+            <el-select v-model="strategyParams.selected_table_index" placeholder="选择表格" style="width: 100%" @change="onTableChange">
+              <el-option
+                v-for="(t, ti) in tableAnalysis.tables"
+                :key="ti"
+                :value="ti"
+                :label="`${t.table_name || t.group_name || '表格' + (ti+1)} (${t.rows}行×${t.cols}列)`"
+              />
+            </el-select>
+          </el-form-item>
 
-          <!-- 列映射表格（简化版） -->
+          <!-- 当前表格的列预览（网格） -->
+          <div class="table-preview-info" style="margin-bottom: 8px;">
+            列预览：{{ tableAnalysis.tables[selectedTableIndex].cols }} 列
+          </div>
           <div class="column-mapping-grid">
             <div
-              v-for="col in tableAnalysis.tables[0].columns"
+              v-for="col in tableAnalysis.tables[selectedTableIndex].columns"
               :key="col.col_index"
               class="column-mapping-item"
               :class="'role-' + col.suggested_role"
             >
               <div class="col-header">
-                <span class="col-index">列 {{ col.col_index }}</span>
+                <span class="col-index">{{ columnIndexToLetter(col.col_index) }}</span>
                 <el-tag size="small" :type="roleTagType(col.suggested_role)" class="col-role-tag">
                   {{ roleLabel(col.suggested_role) }}
                 </el-tag>
@@ -555,40 +649,104 @@ function openRetrievalPanel() {
 
           <el-divider style="margin: 12px 0" />
 
+          <!-- 数据列配置（动态添加） -->
           <el-form label-position="top" size="small">
-            <el-form-item label="员工姓名列">
-              <el-select v-model="strategyParams.employee_col" placeholder="选择员工列" style="width: 100%" @change="onColumnMappingChange">
+            <el-form-item label="数据列（至少一列。留空行号=从当前数据行读取。员工聚合模式下，列名含分组关键词的列支持手动输入分组名称，值不由表格读取。分组关键词可在下方「分组关键词」参数中自定义）">
+              <div v-for="(dc, dci) in dataColumns" :key="dci" class="data-col-row">
+                <el-input
+                  v-model="dc.name"
+                  placeholder="列名"
+                  size="small"
+                  style="width: 90px; flex-shrink: 0;"
+                  @change="onDataColumnsChange"
+                />
+                <!-- 分组关键词列：由用户手动输入分组名称值，不再从表格读取 -->
+                <template v-if="dc.name && strategyParams.group_column_keyword && dc.name.includes(strategyParams.group_column_keyword)">
+                  <el-input
+                    v-model="dc.value"
+                    :placeholder="'输入' + strategyParams.group_column_keyword"
+                    size="small"
+                    style="width: 80px; flex-shrink: 0;"
+                    @change="onDataColumnsChange"
+                  />
+                </template>
+                <el-input
+                  v-model="dc.row"
+                  placeholder="行号"
+                  size="small"
+                  style="width: 60px; flex-shrink: 0;"
+                  type="number"
+                  :min="1"
+                  @change="onDataColumnsChange"
+                />
+                <el-select
+                  v-model="dc.col"
+                  placeholder="列号"
+                  size="small"
+                  style="width: 60px; flex-shrink: 0;"
+                  @change="onDataColumnsChange"
+                >
+                  <el-option
+                    v-for="col in tableAnalysis.tables[selectedTableIndex].columns"
+                    :key="col.col_index"
+                    :value="col.col_index"
+                    :label="columnIndexToLetter(col.col_index)"
+                  >
+                    <span style="display: flex; justify-content: space-between; gap: 12px;">
+                      <span>{{ columnIndexToLetter(col.col_index) }}</span>
+                      <span style="color: #909399; font-size: 12px; text-align: right; flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">
+                        {{ col.sample_values && col.sample_values[0] ? col.sample_values[0] : '' }}
+                        {{ col.sample_values && col.sample_values[1] ? ' / ' + col.sample_values[1] : '' }}
+                      </span>
+                    </span>
+                  </el-option>
+                </el-select>
+                <el-button
+                  type="danger"
+                  :icon="Close"
+                  size="small"
+                  circle
+                  @click="removeDataColumn(dci)"
+                />
+              </div>
+              <el-button type="primary" size="small" plain @click="addDataColumn" style="margin-top: 6px; width: 100%">
+                + 添加数据列
+              </el-button>
+            </el-form-item>
+
+            <!-- 元数据列（多选） -->
+            <el-form-item :label="strategyParams.employee_mode ? '元数据列（多选，每条评分条目会附带其所在行的元数据）' : '元数据列（多选，附加到 Chunk 的 metadata）'">
+              <el-select
+                v-model="strategyParams.metadata_cols"
+                multiple
+                placeholder="选择元数据列"
+                style="width: 100%"
+                @change="onColumnMappingChange"
+              >
                 <el-option
-                  v-for="col in tableAnalysis.tables[0].columns"
+                  v-for="col in tableAnalysis.tables[selectedTableIndex].columns"
                   :key="col.col_index"
                   :value="col.col_index"
-                  :label="`列${col.col_index}: ${col.sample_values[0] || ''} / ${col.sample_values[1] || ''}`"
+                  :label="`${columnIndexToLetter(col.col_index)}${col.sample_values && col.sample_values[0] ? ': ' + col.sample_values[0] : ''}${col.sample_values && col.sample_values[1] ? ' / ' + col.sample_values[1] : ''}`"
                 />
               </el-select>
             </el-form-item>
-            <el-form-item label="评分列">
-              <el-select v-model="strategyParams.score_col" placeholder="选择评分列" style="width: 100%" @change="onColumnMappingChange">
-                <el-option
-                  v-for="col in tableAnalysis.tables[0].columns"
-                  :key="col.col_index"
-                  :value="col.col_index"
-                  :label="`列${col.col_index}: ${col.sample_values[0] || ''} / ${col.sample_values[1] || ''}`"
-                />
-              </el-select>
-            </el-form-item>
-            <el-form-item label="评分理由列（选填）">
-              <el-select v-model="strategyParams.reason_col" placeholder="选择理由列（可选）" style="width: 100%" clearable @change="onColumnMappingChange">
-                <el-option
-                  v-for="col in tableAnalysis.tables[0].columns"
-                  :key="col.col_index"
-                  :value="col.col_index"
-                  :label="`列${col.col_index}: ${col.sample_values[0] || ''} / ${col.sample_values[1] || ''}`"
-                />
-                <el-option :value="-1" label="无评分理由列" />
-              </el-select>
-            </el-form-item>
-            <el-form-item label="跳过表头行数">
-              <el-input-number v-model="strategyParams.skip_rows" :min="0" :max="10" :step="1" style="width: 100%" @change="onColumnMappingChange" />
+
+            <!-- 保存当前表格配置 -->
+            <el-form-item>
+              <el-button
+                type="success"
+                size="small"
+                plain
+                @click="saveTableConfig"
+                style="width: 100%"
+              >
+                <el-icon v-if="hasSavedTableConfig(selectedTableIndex)" style="margin-right: 4px;"><Document /></el-icon>
+                {{ hasSavedTableConfig(selectedTableIndex) ? '更新当前表格配置' : '保存当前表格配置' }}
+              </el-button>
+              <div v-if="hasSavedTableConfig(selectedTableIndex)" style="font-size: 12px; color: #67c23a; margin-top: 4px; text-align: center;">
+                当前表格配置已保存，切换表格后会自动恢复
+              </div>
             </el-form-item>
           </el-form>
         </div>
@@ -1022,17 +1180,20 @@ function openRetrievalPanel() {
 }
 
 .column-mapping-grid {
-  display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(140px, 1fr));
-  gap: 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
   margin-bottom: 8px;
 }
 
 .column-mapping-item {
   border: 1px solid #e4e7ed;
   border-radius: 6px;
-  padding: 8px;
+  padding: 6px 12px;
   font-size: 12px;
+  display: flex;
+  align-items: center;
+  gap: 12px;
 }
 
 .column-mapping-item.role-employee {
@@ -1050,8 +1211,8 @@ function openRetrievalPanel() {
 .col-header {
   display: flex;
   align-items: center;
-  justify-content: space-between;
-  margin-bottom: 6px;
+  gap: 8px;
+  flex-shrink: 0;
 }
 
 .col-index {
@@ -1064,17 +1225,36 @@ function openRetrievalPanel() {
 }
 
 .col-samples {
+  display: flex;
+  align-items: center;
+  gap: 10px;
   color: #909399;
   line-height: 1.5;
+  overflow: hidden;
 }
 
 .col-sample {
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
+  max-width: 150px;
+}
+
+.col-sample + .col-sample::before {
+  content: '|';
+  margin-right: 10px;
+  color: #dcdfe6;
 }
 
 .empty-analysis {
   padding: 20px 0;
+}
+
+/* ── 数据列动态配置行 ── */
+.data-col-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-bottom: 6px;
 }
 </style>

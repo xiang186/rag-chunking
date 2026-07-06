@@ -24,6 +24,10 @@ dist/
 .DS_Store
 Thumbs.db
 
+# Database files
+*.db
+backend/rag_chunking.db
+
 # Uploaded files
 backend/uploads/
 

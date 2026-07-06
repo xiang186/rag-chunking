@@ -133,8 +133,9 @@ export async function searchChunks(
 
 export async function analyzeTables(
   docId: string,
+  skipRows: number = 0,
 ): Promise<Record<string, unknown>> {
-  const { data } = await api.post(`/documents/${docId}/analyze-tables`)
+  const { data } = await api.post(`/documents/${docId}/analyze-tables`, { skip_rows: skipRows })
   return data
 }
 

@@ -38,6 +38,12 @@ class TestEmbeddingRequest(BaseModel):
     model: str = "text-embedding-3-small"
 
 
+class AnalyzeTablesRequest(BaseModel):
+    """分析表格结构请求。"""
+
+    skip_rows: int = 0
+
+
 @router.get("/strategies")
 async def list_strategies():
     """获取所有可用分块策略及参数 schema。"""
@@ -78,6 +84,7 @@ async def upload_document(
 @router.post("/{doc_id}/analyze-tables")
 async def analyze_document_tables(
     doc_id: str,
+    request: AnalyzeTablesRequest,
     session: AsyncSession = Depends(get_db),
 ):
     """
@@ -90,7 +97,7 @@ async def analyze_document_tables(
     if not doc.content_text:
         raise HTTPException(status_code=400, detail="文档内容为空")
 
-    result = analyze_tables(doc.content_text)
+    result = analyze_tables(doc.content_text, skip_rows=request.skip_rows)
 
     # 转换为可序列化格式
     tables_data = []
@@ -107,6 +114,7 @@ async def analyze_document_tables(
             "rows": t.rows,
             "cols": t.cols,
             "group_name": t.group_name,
+            "table_name": t.table_name,
             "columns": cols,
         })
 
